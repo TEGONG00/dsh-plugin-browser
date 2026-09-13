@@ -10,7 +10,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import { IconGlobeOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { BrowserPanel } from './panel.tsx'
 import { ScreenshotToolView } from './tool-card.tsx'
-import { browserElementSource, insertElementRef } from './element-refs.ts'
+import { browserElementSource, insertElementRef, watchComposerClear } from './element-refs.ts'
 
 const TAB_ID = 'dsh-plugin-browser'
 const TAB_KIND = 'browser'
@@ -96,6 +96,7 @@ export function apply(ctx: ClientContext): void {
       inject: (sessionId: string) => ({
         insertElement: (pick: Parameters<typeof insertElementRef>[2]) =>
           insertElementRef(ctx, sessionId, pick),
+        watchComposer: () => watchComposerClear(ctx, sessionId),
       }),
     }, BrowserPanel),
   ), 'dsh-plugin-browser: tab body')

@@ -104,6 +104,38 @@ export function elementModelText(ref: string): string {
   return lines.filter(Boolean).join('\n')
 }
 
+/** Clear the element registry and restart numbering from 元素1. */
+export function resetElements(): void {
+  elements.clear()
+  seq = 0
+  persist()
+  for (const listener of lexiconListeners) {
+    try {
+      listener()
+    } catch {
+      // decoration listeners must not break the reset
+    }
+  }
+}
+
+/**
+ * Watch one session's composer and reset numbering whenever the draft
+ * empties while idle — the state a committed send (or a manual clear)
+ * leaves behind. Callers own the subscription lifecycle (panel mount).
+ */
+export function watchComposerClear(ctx: ClientContext, sessionId: string): () => void {
+  const binding = ctx.sessions.binding(sessionId as never)
+  if (!binding) return () => undefined
+  const input = ctx.conversation.input.for(binding.ctx)
+  let prevHadContent = false
+  return input.state.subscribe(() => {
+    const state = input.state.getSnapshot()
+    const hadContent = prevHadContent
+    prevHadContent = state.draft !== ''
+    if (hadContent && state.draft === '' && state.phase === 'plain') resetElements()
+  })
+}
+
 /** The `@` trigger source backing 元素N chips (menu, decoration, serialization). */
 export function browserElementSource(): InputTriggerSource {
   return {
@@ -155,11 +187,14 @@ export function browserElementSource(): InputTriggerSource {
  * closest anchor to the cursor.)
  */
 export function insertElementRef(ctx: ClientContext, sessionId: string, pick: ElementPick): string {
-  const { ref, label } = rememberElement(pick)
   const binding = ctx.sessions.binding(sessionId as never)
   if (!binding) throw new Error('session binding unavailable')
   const input = ctx.conversation.input.for(binding.ctx)
   const state = input.state.getSnapshot()
+  // Lazy reset for sends/clears that happened while the panel was hidden:
+  // an idle empty draft means the previous round is over — numbering restarts.
+  if (seq > 0 && state.draft === '' && state.phase === 'plain') resetElements()
+  const { ref, label } = rememberElement(pick)
   const chipExtra = state.occurrences.reduce((sum, occ) => sum + (occ.length - 1), 0)
   const at = Math.max(0, state.draft.length - chipExtra)
   const applied = input.insertReference(

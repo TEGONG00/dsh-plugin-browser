@@ -16,6 +16,8 @@ interface BrowserStatus {
 export interface BrowserPanelInjected {
   /** Insert one picked element as a composer reference chip (元素N). */
   insertElement: (pick: ElementPick) => string
+  /** Watch the composer; numbering resets when the draft clears (sent/cleared). */
+  watchComposer: () => () => void
 }
 
 interface BrowserPanelProps {
@@ -23,6 +25,7 @@ interface BrowserPanelProps {
     tab: { visible: boolean; active: unknown }
   }
   insertElement: (pick: ElementPick) => string
+  watchComposer: () => () => void
 }
 
 /**
@@ -64,7 +67,7 @@ async function postCommand(command: Record<string, unknown>): Promise<Record<str
 }
 
 export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
-  const { insertElement } = props
+  const { insertElement, watchComposer } = props
   const { tab } = props.useTabInfo()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const scaleRef = useRef({ width: 1280, height: 800 })
@@ -119,6 +122,10 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
       setConnected(false)
     }
   }, [tab.visible, drawFrame, handlePick])
+
+  // Numbering restarts at 元素1 once the composer empties (send committed
+  // or manually cleared); the subscription lives with the panel mount.
+  useEffect(() => watchComposer(), [watchComposer])
 
   // Native non-passive wheel forwarder so the panel itself never scrolls.
   useEffect(() => {

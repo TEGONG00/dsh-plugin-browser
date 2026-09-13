@@ -103,8 +103,23 @@ await composer.type('把元素1和元素2调换位置')
 await page.waitForTimeout(300)
 const finalText = (await composer.textContent()) ?? ''
 if (!finalText.includes('把元素1和元素2调换位置')) await fail('typed instruction missing from draft')
-await page.screenshot({ path: '/tmp/ui-smoke-final.png', fullPage: true })
 console.log('PASS: instruction referencing 元素1/元素2 typed into the draft')
+
+// 6. Clearing the composer (the post-send state) restarts numbering at 元素1.
+await composer.click()
+await page.keyboard.press('ControlOrMeta+a')
+await page.keyboard.press('Delete')
+await page.waitForTimeout(500)
+await page.mouse.click(canvasBox.x + canvasBox.width * 0.5, canvasBox.y + canvasBox.height * 0.42)
+await page.waitForTimeout(900)
+const afterClear = (await composer.textContent()) ?? ''
+if (!afterClear.includes('元素1')) {
+  console.error('draft after clear+pick:', JSON.stringify(afterClear.slice(0, 200)))
+  await fail('numbering did not restart at 元素1 after the draft cleared')
+}
+console.log('PASS: numbering restarted at 元素1 after the composer emptied')
+
+await page.screenshot({ path: '/tmp/ui-smoke-final.png', fullPage: true })
 console.log('screenshot: /tmp/ui-smoke-final.png')
 
 const relevant = errors.filter((e) => !/favicon|sourcemap|manifest/.test(e))
