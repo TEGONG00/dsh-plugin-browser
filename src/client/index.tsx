@@ -1,5 +1,4 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import type { ComposerAttachment, ConversationController } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -7,14 +6,16 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-tool/client'
+import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import { IconGlobeOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { BrowserPanel } from './panel.tsx'
 import { ScreenshotToolView } from './tool-card.tsx'
+import { browserElementSource, insertElementRef } from './element-refs.ts'
 
 const TAB_ID = 'dsh-plugin-browser'
 const TAB_KIND = 'browser'
 
-export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'conversation']
+export const inject = ['slots', 'sidebarRightTabs', 'sidebarRight', 'conversation', 'sessions', 'inputTriggers']
 
 interface FooterActionProps extends PropsRuntime<'sidebar.footer.action'> {
   open: () => void
@@ -71,6 +72,9 @@ function FooterButton(props: FooterActionProps): React.ReactNode {
 }
 
 export function apply(ctx: ClientContext): void {
+  // The 元素N reference source: codecs picked chips into model text at submit.
+  ctx.effect(() => ctx.inputTriggers.registerSource(browserElementSource()), 'dsh-plugin-browser: element trigger source')
+
   // Stage 1: the tab type (page type opened by kind; no resource patterns).
   ctx.effect(() => ctx.sidebarRightTabs.register({
     id: TAB_ID,
@@ -90,8 +94,8 @@ export function apply(ctx: ClientContext): void {
       name: 'sidebar.right.pane.tab',
       key: TAB_ID,
       inject: (sessionId: string) => ({
-        createDrafts: (files: readonly File[]): readonly ComposerAttachment[] =>
-          (ctx.conversation as ConversationController).createDrafts(sessionId as never, files),
+        insertElement: (pick: Parameters<typeof insertElementRef>[2]) =>
+          insertElementRef(ctx, sessionId, pick),
       }),
     }, BrowserPanel),
   ), 'dsh-plugin-browser: tab body')

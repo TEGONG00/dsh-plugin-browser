@@ -7,10 +7,9 @@
 ## 功能
 
 - **右侧栏浏览器 tab**：侧栏底部「🌐 浏览器」按钮打开（样式与「设置」行完全一致）；工具栏含后退 / 前进 / 刷新 / URL 栏 / 选择元素开关；画布实时显示页面（CDP screencast，JPEG），鼠标移动、点击、双击、滚轮、键盘都会转发给被控页面。
-- **选择元素 → 暂存 → 任务化上传**：点击「选择元素」（lucide `MousePointerClick` 图标）后进入选择模式：
-  - 点击页面元素会加入面板**暂存区**（可连续选多个，缩略图可单独移除），不会动输入框；
-  - 在画布下方的**意见输入框**写下想怎么改，点「**上传任务**」——暂存元素打包成「任务N」加入 dsh 输入框：每个元素一张截图附件 + 一个 `任务N.json`（任务号、意见、全部元素信息），草稿追加一行 `任务N：<意见>`；
-  - 可以继续选、继续上传 → 任务2、任务3……最后在对话框点发送，消息自带「请按任务编号顺序逐个完成」，模型按序执行。
+- **选择元素 → 「元素N」引用 chip**：点击「选择元素」（lucide `MousePointerClick` 图标）后进入选择模式，点击页面元素会立刻以原生引用 chip 的形式把 **元素1、元素2……** 插入 dsh 输入框（与 `@文件` 引用同一机制：Lexical chip 节点，可删除、可撤销、跟随草稿持久化）。像引用文件一样在句子里自由组合：
+  > 把元素1和元素2调换位置
+  发送时每个 chip 自动展开为该元素的完整信息（选择器 / 标签 / 文本 / outerHTML / 所在页面 URL），模型据此精确定位要改的元素。元素登记表存于 sessionStorage，客户端刷新后已插入的 chip 仍可序列化。
 - **模型工具**（`browser_navigate` / `browser_screenshot` / `browser_snapshot` / `browser_click` / `browser_type`）：模型可以打开页面、看截图（返回持久化 image 附件，多模态可见）、拿交互元素大纲（`[12] <button> "Submit"` 风格索引）、按索引点击和输入——「改代码 → 自己打开页面 → 截图验收」闭环。`browser_screenshot` 的结果在聊天里渲染为图片卡片。
 
 ## 运行环境要求
@@ -84,14 +83,15 @@ node scripts/footer-verify.mjs <token>  # 断言「浏览器」与「设置」�
 
 - **tab 注册**：`ctx.sidebarRightTabs.register()` + keyed slot `sidebar.right.pane.tab`（`docs/subsystems/sidebar-right.zh.md`）；入口按钮走 `sidebar.footer.action` list slot，样式逐字复刻设置触发行（行容器 + 42px 按钮 + rail 圆形形态）。
 - **client bundle**：package.json 声明 `dsh.client: {platform: 'web'}` + `exports['./client']`，host 自动扫描并经 `/plugins/` 下发；产物是 `window.__ModuleLoader__.load({id, factory})` lazy-CJS（`scripts/build.mjs` 用 esbuild banner/footer 复刻）（`docs/subsystems/client-modules.zh.md`）。
+- **元素 chip**：`ctx.inputTriggers.registerSource()` 注册 `@` 触发源（codec.serialize 在提交时把 chip 展开为元素信息）；插入走 `ctx.sessions.binding(id).ctx` → `ctx.conversation.input.for(actx).insertReference()`（`docs/subsystems/` conversation 契约与 `dsh-client-ui-input-trigger` 类型）。TokenSpan 坐标在 detect 空间——每个 chip 占 1 字符，插入锚点 = 剪贴板草稿长度 − Σ(chip 额外宽度)。
 - **传输**：`ctx.webServer.register()` 两条自有路由——`GET /dsh-browser/api/stream`（SSE：画面帧/状态/选取事件）+ `POST /dsh-browser/api/cmd`（指令下发），Origin 同源校验（`docs/subsystems/web-server.zh.md`）。
 - **图标**：后退/前进/刷新/入口用 dsh 自带图标族 `@deepseek-ai/dsh-client-ui-primitives`（platform module，与「收起侧栏」同源，`currentColor` 跟随主题）；「选择元素」用 lucide-react `MousePointerClick`（tree-shake 后 ~2KB 入 bundle）。
-- **附件**：客户端 `ctx.conversation.createDrafts(sessionId, File[])` + `inputActions.addAttachments()`；发送时 image 走 base64 准入、json 走文件上传回执（`docs/subsystems/attachment.zh.md`）。
 - **工具卡片**：`tool.call.toolview` keyed slot 按 wire 工具名注册（`docs/cookbook/adding-a-tool.zh.md`「Web Client 展示」）。
 
 ## 已知限制
 
 - picker 只覆盖主 frame，不穿透 shadow DOM / iframe。
+- chip 插入位置为输入框末尾（公共输入 API 不暴露光标偏移，末尾是最接近「光标处」的锚点）；chip 外观为 dsh 标准引用样式（共享组件，无按来源配色钩子）。
 - 画面流仅在面板可见时推送（CPU 友好）；隐藏再显示会自动重连。
 - 自有路由未接入 dsh 的会话认证（webServer 默认只绑回环，且做了 Origin 同源校验）；不要把 `--host 0.0.0.0` 暴露到不可信网络。
 - 「选择元素」依赖真实鼠标事件，被页面自己的 capture 监听器抢先的场景少见但可能。

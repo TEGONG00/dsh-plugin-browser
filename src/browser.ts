@@ -46,8 +46,6 @@ export interface ElementPick extends Record<string, unknown> {
   viewport: { width: number; height: number }
   url: string
   title: string
-  /** Base64-encoded JPEG crop of the element. */
-  screenshotBase64: string
 }
 
 type Listener<T> = (value: T) => void
@@ -159,16 +157,10 @@ export class BrowserController {
     const page = this.page
     if (!page) return
     try {
-      const rect = payload.rect as ElementPick['rect']
-      let screenshotBase64 = ''
-      if (rect && rect.width > 0 && rect.height > 0) {
-        screenshotBase64 = await this.cropScreenshot(rect)
-      }
       const pick = {
         ...(payload as unknown as ElementPick),
         url: page.url(),
         title: await page.title().catch(() => ''),
-        screenshotBase64,
       }
       for (const listener of this.pickListeners) {
         try {
@@ -180,22 +172,6 @@ export class BrowserController {
     } catch (error) {
       this.logger.warn('[dsh-plugin-browser] pick handling failed', error)
     }
-  }
-
-  private async cropScreenshot(rect: ElementPick['rect']): Promise<string> {
-    const page = this.requirePage()
-    const pad = 4
-    const buffer = await page.screenshot({
-      type: 'jpeg',
-      quality: this.config.jpegQuality ?? 60,
-      clip: {
-        x: Math.max(0, rect.docX - pad),
-        y: Math.max(0, rect.docY - pad),
-        width: Math.min(rect.width + pad * 2, 4096),
-        height: Math.min(rect.height + pad * 2, 4096),
-      },
-    })
-    return buffer.toString('base64')
   }
 
   async status(): Promise<BrowserStatus> {
@@ -377,7 +353,7 @@ export class BrowserController {
       const selector = 'a, button, input, textarea, select, [role], [onclick], [contenteditable], label, summary, h1, h2, h3, h4, h5, h6'
       const lines: string[] = []
       let index = 0
-      for (const el of document.querySelectorAll(selector)) {
+      for (const el of Array.from(document.querySelectorAll(selector))) {
         if (index >= max) break
         const style = window.getComputedStyle(el)
         if (style.display === 'none' || style.visibility === 'hidden') continue

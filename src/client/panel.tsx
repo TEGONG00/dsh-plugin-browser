@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MousePointerClick, Upload, X } from 'lucide-react'
+import { MousePointerClick } from 'lucide-react'
 import {
   IconChevronLeftOutline14,
   IconChevronRightOutline14,
   IconRefreshOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { DraftAttachmentId } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { ComposerAttachment } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ElementPick } from './element-refs.ts'
 
 interface BrowserStatus {
   url: string
@@ -14,37 +13,16 @@ interface BrowserStatus {
   viewport: { width: number; height: number }
 }
 
-interface ElementPick extends Record<string, unknown> {
-  tag: string
-  id: string
-  selector: string
-  text: string
-  outerHTML: string
-  url: string
-  title: string
-  screenshotBase64: string
-}
-
-interface StagedElement {
-  id: number
-  pick: ElementPick
-  thumbUrl: string
-}
-
 export interface BrowserPanelInjected {
-  createDrafts: (files: readonly File[]) => readonly ComposerAttachment[]
+  /** Insert one picked element as a composer reference chip (元素N). */
+  insertElement: (pick: ElementPick) => string
 }
 
 interface BrowserPanelProps {
   useTabInfo: () => {
     tab: { visible: boolean; active: unknown }
   }
-  inputActions: {
-    addAttachments: (ids: readonly DraftAttachmentId[]) => boolean
-    setDraft: (text: string) => void
-  }
-  useInput: <S>(selector: (state: { draft: string }) => S) => S
-  createDrafts: (files: readonly File[]) => readonly ComposerAttachment[]
+  insertElement: (pick: ElementPick) => string
 }
 
 /**
@@ -67,40 +45,14 @@ const PANEL_STYLES = `
   color: #3b82f6; font-weight: 600;
   background: color-mix(in srgb, #3b82f6 12%, transparent);
 }
-.dsh-browser-btn:disabled { opacity: 0.4; cursor: default; }
-.dsh-browser-btn:disabled:hover { background: transparent; }
 .dsh-browser-url {
   flex: 1; min-width: 80px; height: 26px; font-size: 12px; padding: 0 8px;
   border: none; border-radius: 6px; background: transparent; color: inherit;
 }
 .dsh-browser-url:hover { background: color-mix(in srgb, currentColor 6%, transparent); }
 .dsh-browser-url:focus { outline: none; background: color-mix(in srgb, currentColor 8%, transparent); }
-.dsh-browser-url::placeholder, .dsh-browser-opinion::placeholder { color: color-mix(in srgb, currentColor 45%, transparent); }
-.dsh-browser-opinion {
-  flex: 1; min-width: 60px; height: 26px; font-size: 12px; padding: 0 8px;
-  border: none; border-radius: 6px; background: color-mix(in srgb, currentColor 6%, transparent); color: inherit;
-}
-.dsh-browser-opinion:focus { outline: none; background: color-mix(in srgb, currentColor 10%, transparent); }
-.dsh-browser-thumb {
-  position: relative; flex: none; width: 44px; height: 34px; border-radius: 5px; overflow: hidden;
-  border: 1px solid color-mix(in srgb, currentColor 20%, transparent); background: color-mix(in srgb, currentColor 8%, transparent);
-}
-.dsh-browser-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.dsh-browser-thumb-x {
-  position: absolute; top: 0; right: 0; width: 14px; height: 14px;
-  display: flex; align-items: center; justify-content: center;
-  border: none; border-radius: 0 0 0 4px; padding: 0; cursor: pointer;
-  background: color-mix(in srgb, black 55%, transparent); color: #fff;
-}
+.dsh-browser-url::placeholder { color: color-mix(in srgb, currentColor 45%, transparent); }
 `
-
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64)
-  const buffer = new ArrayBuffer(binary.length)
-  const bytes = new Uint8Array(buffer)
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
-  return buffer
-}
 
 async function postCommand(command: Record<string, unknown>): Promise<Record<string, unknown>> {
   const response = await fetch('/dsh-browser/api/cmd', {
@@ -112,20 +64,15 @@ async function postCommand(command: Record<string, unknown>): Promise<Record<str
 }
 
 export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
-  const { inputActions, useInput, createDrafts } = props
+  const { insertElement } = props
   const { tab } = props.useTabInfo()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const scaleRef = useRef({ width: 1280, height: 800 })
-  const stagedIdRef = useRef(0)
-  const taskSeqRef = useRef(0)
   const [status, setStatus] = useState<BrowserStatus | null>(null)
   const [connected, setConnected] = useState(false)
   const [picking, setPicking] = useState(false)
   const [notice, setNotice] = useState('')
   const [urlDraft, setUrlDraft] = useState('')
-  const [staged, setStaged] = useState<StagedElement[]>([])
-  const [opinion, setOpinion] = useState('')
-  const draftText = useInput((state) => state.draft)
 
   const drawFrame = useCallback((base64: string) => {
     const canvas = canvasRef.current
@@ -143,15 +90,13 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
   }, [])
 
   const handlePick = useCallback((pick: ElementPick) => {
-    stagedIdRef.current += 1
-    const entry: StagedElement = {
-      id: stagedIdRef.current,
-      pick,
-      thumbUrl: `data:image/jpeg;base64,${pick.screenshotBase64}`,
+    try {
+      const label = insertElement(pick)
+      setNotice(`${label} 已插入输入框，像引用文件一样在句子里引用它`)
+    } catch (error) {
+      setNotice(`插入失败：${error instanceof Error ? error.message : String(error)}`)
     }
-    setStaged((current) => [...current, entry])
-    setNotice(`已暂存 <${pick.tag || 'element'}>，可继续选择；写好修改意见后点「上传任务」`)
-  }, [])
+  }, [insertElement])
 
   useEffect(() => {
     if (!tab.visible) return undefined
@@ -201,38 +146,8 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
   const togglePick = async () => {
     const next = !picking
     setPicking(next)
-    setNotice(next ? '选择模式：点击页面元素加入暂存区，可连续选择' : '')
+    setNotice(next ? '选择模式：点击页面元素，会以「元素N」引用插入输入框' : '')
     await postCommand({ type: 'pick', enabled: next })
-  }
-
-  const uploadTask = () => {
-    if (staged.length === 0) return
-    taskSeqRef.current += 1
-    const taskNo = taskSeqRef.current
-    const files: File[] = staged.map((entry, index) =>
-      new File(
-        [base64ToArrayBuffer(entry.pick.screenshotBase64)],
-        `任务${taskNo}-${index + 1}-${entry.pick.tag || 'element'}.jpg`,
-        { type: 'image/jpeg' },
-      ))
-    files.push(new File(
-      [JSON.stringify({ task: taskNo, opinion, elements: staged.map((entry) => entry.pick) }, null, 2)],
-      `任务${taskNo}.json`,
-      { type: 'application/json' },
-    ))
-    const drafts = createDrafts(files)
-    const added = inputActions.addAttachments(drafts.map((draft) => draft.id))
-    const line = `任务${taskNo}：${opinion || '按附加的元素截图与信息修改'}`
-    const base = draftText.trimEnd()
-    const instruction = base.includes('请按任务编号顺序逐个完成')
-      ? line
-      : '请按任务编号顺序逐个完成以下修改任务：\n' + line
-    inputActions.setDraft(base ? base + '\n' + instruction : instruction)
-    setStaged([])
-    setOpinion('')
-    setNotice(added
-      ? `任务${taskNo} 已加入对话框（${staged.length} 个元素）；可继续选择追加任务，发送后按序执行`
-      : `任务${taskNo} 的文字已写入输入框，但附件暂不可用，请稍后重试`)
   }
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
@@ -284,7 +199,7 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
           type="button"
           className="dsh-browser-btn"
           data-on={picking ? '1' : '0'}
-          title="选择元素加入暂存区"
+          title="选择元素，以「元素N」引用插入输入框"
           style={{ padding: '0 8px' }}
           onClick={() => void togglePick()}
         >
@@ -321,46 +236,6 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
             background: 'color-mix(in srgb, currentColor 12%, transparent)',
           }}
         />
-      </div>
-      {staged.length > 0 ? (
-        <div style={{ display: 'flex', gap: 6, padding: '6px 6px 2px', flexWrap: 'wrap', alignItems: 'center' }}>
-          {staged.map((entry) => (
-            <div key={entry.id} className="dsh-browser-thumb" title={`<${entry.pick.tag}> ${entry.pick.selector}`}>
-              <img src={entry.thumbUrl} alt={entry.pick.tag} />
-              <button
-                type="button"
-                className="dsh-browser-thumb-x"
-                title="移除"
-                onClick={() => setStaged((current) => current.filter((item) => item.id !== entry.id))}
-              >
-                <X size={9} />
-              </button>
-            </div>
-          ))}
-          <span style={{ opacity: 0.7 }}>已暂存 {staged.length} 个元素</span>
-        </div>
-      ) : null}
-      <div style={{ display: 'flex', gap: 4, alignItems: 'center', padding: '4px 6px' }}>
-        <input
-          className="dsh-browser-opinion"
-          value={opinion}
-          placeholder={staged.length > 0 ? `对这 ${staged.length} 个元素的修改意见…` : '先点「选择元素」再选页面元素'}
-          onChange={(event) => setOpinion(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') uploadTask()
-          }}
-        />
-        <button
-          type="button"
-          className="dsh-browser-btn"
-          style={{ padding: '0 10px', border: '1px solid color-mix(in srgb, currentColor 20%, transparent)' }}
-          disabled={staged.length === 0}
-          title="把暂存元素与意见作为一个任务加入对话框"
-          onClick={uploadTask}
-        >
-          <Upload size={13} />
-          <span>上传任务{taskSeqRef.current > 0 ? `（下一个：任务${taskSeqRef.current + 1}）` : ''}</span>
-        </button>
       </div>
       <div style={{ display: 'flex', gap: 8, padding: '3px 6px', opacity: 0.75, alignItems: 'center' }}>
         <span

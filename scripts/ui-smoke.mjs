@@ -1,8 +1,8 @@
 /**
  * UI smoke test: boots the real dsh web client in headless Chromium and walks
- * the browser-panel task workflow — open tab, navigate, stage two elements,
- * upload as 任务1 with an opinion, stage another and upload as 任务2, and
- * check the composer carries the attachments and ordered task lines.
+ * the browser-panel reference-chip workflow — open tab, navigate, pick two
+ * elements, expect 元素1/元素2 reference chips inserted into the composer
+ * (no attachments), then type an instruction referencing them.
  * Run while `dsh web --patch …` is up:
  *   node scripts/ui-smoke.mjs <token>
  */
@@ -73,7 +73,7 @@ for (let i = 0; i < 10; i += 1) {
 if (!sawTitle) await fail('panel status bar did not show navigated page title')
 console.log('PASS: panel navigated and status bar shows page title')
 
-// 4. Pick mode on; stage two elements (clicks land in the staged strip only).
+// 4. Pick mode on; pick two elements — each inserts a 元素N chip, no attachments.
 await page.getByRole('button', { name: /选择元素/ }).click()
 await page.waitForTimeout(600)
 const canvasBox = await canvas.boundingBox()
@@ -82,47 +82,29 @@ await page.mouse.click(canvasBox.x + canvasBox.width * 0.5, canvasBox.y + canvas
 await page.waitForTimeout(900)
 await page.mouse.click(canvasBox.x + canvasBox.width * 0.5, canvasBox.y + canvasBox.height * 0.32)
 await page.waitForTimeout(900)
-const stagedCount = await page.locator('.dsh-browser-thumb').count()
-if (stagedCount < 2) await fail(`expected ≥2 staged element thumbnails, found ${stagedCount}`)
-console.log(`PASS: ${stagedCount} elements staged without touching the composer`)
 
-// 5. Type an opinion and upload as 任务1.
-await page.getByPlaceholder(/修改意见/).fill('把这些元素改成蓝色主题')
-await page.getByRole('button', { name: /上传任务/ }).click()
-await page.waitForTimeout(1200)
-const blobImgs = await page.locator('img[src^="blob:"]').count()
-const composerEarly = page.locator('[contenteditable="true"]').first()
-const draftEarly = (await composerEarly.count()) ? ((await composerEarly.textContent()) ?? '') : ''
-if (blobImgs < 2 || !draftEarly.includes('任务1')) {
-  const notice = await page.locator('div').filter({ hasText: /已加入对话框|暂不可用/ }).first().textContent().catch(() => '')
-  console.error(`blob imgs: ${blobImgs}, notice: ${JSON.stringify(notice)}, draft: ${JSON.stringify(draftEarly.slice(0, 200))}`)
-  await fail('任务1 upload did not produce attachments + draft line')
-}
-console.log('PASS: 任务1 uploaded — attachment chips visible in composer')
-
-// 6. Stage one more element and upload as 任务2.
-await page.mouse.click(canvasBox.x + canvasBox.width * 0.5, canvasBox.y + canvasBox.height * 0.42)
-await page.waitForTimeout(900)
-await page.getByPlaceholder(/修改意见/).fill('再把这个元素放大')
-await page.getByRole('button', { name: /上传任务/ }).click()
-await page.waitForTimeout(1200)
-console.log('PASS: 任务2 uploaded')
-
-// 7. The composer draft carries the ordered task lines.
 const composer = page.locator('[contenteditable="true"]').first()
 if (!(await composer.count())) await fail('composer editor not found')
 const draftText = (await composer.textContent()) ?? ''
-if (!draftText.includes('任务1') || !draftText.includes('任务2')) {
-  console.error('draft text:', JSON.stringify(draftText.slice(0, 400)))
-  await fail('composer draft missing 任务1/任务2 lines')
+if (!draftText.includes('元素1') || !draftText.includes('元素2')) {
+  const notice = await page.locator('div').filter({ hasText: /已插入输入框|插入失败/ }).first().textContent().catch(() => '')
+  console.error('panel notice:', JSON.stringify(notice))
+  console.error('draft text:', JSON.stringify(draftText.slice(0, 300)))
+  await fail('composer draft missing 元素1/元素2 chips after picking')
 }
-if (!draftText.includes('请按任务编号顺序逐个完成')) await fail('draft missing ordered-execution instruction')
-console.log('PASS: composer draft has ordered 任务1/任务2 lines')
+const blobImgs = await page.locator('img[src^="blob:"]').count()
+if (blobImgs !== 0) await fail(`expected no attachment previews on chip flow, found ${blobImgs}`)
+console.log('PASS: picking inserted 元素1/元素2 chips (no attachments)')
 
-// 8. Composer still accepts manual text alongside the tasks.
+// 5. Type an instruction referencing the chips.
 await composer.click()
-await composer.type(' 以上一起改，改完截图给我')
+await page.keyboard.press('End')
+await composer.type('把元素1和元素2调换位置')
+await page.waitForTimeout(300)
+const finalText = (await composer.textContent()) ?? ''
+if (!finalText.includes('把元素1和元素2调换位置')) await fail('typed instruction missing from draft')
 await page.screenshot({ path: '/tmp/ui-smoke-final.png', fullPage: true })
+console.log('PASS: instruction referencing 元素1/元素2 typed into the draft')
 console.log('screenshot: /tmp/ui-smoke-final.png')
 
 const relevant = errors.filter((e) => !/favicon|sourcemap|manifest/.test(e))
