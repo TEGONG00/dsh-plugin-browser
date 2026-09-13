@@ -1,7 +1,9 @@
 /**
  * UI smoke test: boots the real dsh web client in headless Chromium and walks
- * the browser-panel flow — open tab, navigate, pick an element, expect the
- * composer attachment chips. Run while `dsh web --patch …` is up:
+ * the browser-panel task workflow — open tab, navigate, stage two elements,
+ * upload as 任务1 with an opinion, stage another and upload as 任务2, and
+ * check the composer carries the attachments and ordered task lines.
+ * Run while `dsh web --patch …` is up:
  *   node scripts/ui-smoke.mjs <token>
  */
 import { chromium } from 'playwright'
@@ -58,7 +60,7 @@ console.log('PASS: browser tab opened with canvas')
 
 // 3. Navigate through the panel URL bar.
 const urlInput = page.getByPlaceholder('输入网址后回车')
-await urlInput.fill("data:text/html,<title>PanelDemo</title><h1 style='margin-top:200px'>dsh panel demo</h1><button id='b1' style='font-size:28px;padding:16px'>PRESS ME</button><input id='i1' placeholder='search-here'/>")
+await urlInput.fill("data:text/html,<title>PanelDemo</title><h1 style='margin-top:120px'>dsh panel demo</h1><button id='b1' style='font-size:28px;padding:16px;margin:8px'>PRESS ME</button><input id='i1' placeholder='search-here' style='font-size:22px;padding:12px;margin:8px'/><a href='#' style='font-size:24px;margin:8px;display:inline-block'>a link</a>")
 await urlInput.press('Enter')
 let sawTitle = false
 for (let i = 0; i < 10; i += 1) {
@@ -68,50 +70,58 @@ for (let i = 0; i < 10; i += 1) {
     break
   }
 }
-if (!sawTitle) {
-  const barText = await page.evaluate(() => {
-    const spans = [...document.querySelectorAll('span')]
-    return spans.map((s) => s.textContent?.trim()).filter((t) => t && (t.includes('Demo') || t.includes('data:') || t.includes('未连接') || t.includes('待启动')))
-  })
-  console.error('status bar candidates:', JSON.stringify(barText))
-  await fail('panel status bar did not show navigated page title')
-}
+if (!sawTitle) await fail('panel status bar did not show navigated page title')
 console.log('PASS: panel navigated and status bar shows page title')
 
-// 4. Toggle pick mode and click the button element on the canvas.
+// 4. Pick mode on; stage two elements (clicks land in the staged strip only).
 await page.getByRole('button', { name: /选择元素/ }).click()
-await page.waitForTimeout(800)
+await page.waitForTimeout(600)
 const canvasBox = await canvas.boundingBox()
 if (!canvasBox) await fail('canvas bounding box unavailable')
-// The demo page is 1280x800; button sits near the top. Click around its area.
-await page.mouse.click(canvasBox.x + canvasBox.width / 2, canvasBox.y + canvasBox.height * 0.35)
-await page.waitForTimeout(2500)
+await page.mouse.click(canvasBox.x + canvasBox.width * 0.5, canvasBox.y + canvasBox.height * 0.22)
+await page.waitForTimeout(900)
+await page.mouse.click(canvasBox.x + canvasBox.width * 0.5, canvasBox.y + canvasBox.height * 0.32)
+await page.waitForTimeout(900)
+const stagedCount = await page.locator('.dsh-browser-thumb').count()
+if (stagedCount < 2) await fail(`expected ≥2 staged element thumbnails, found ${stagedCount}`)
+console.log(`PASS: ${stagedCount} elements staged without touching the composer`)
 
-// 5. Expect composer attachment chips (element jpg + json as drafts).
-const chip = page.locator('[data-dsh-browser-picker-overlay]').count() // overlay only exists in the controlled page
-const attachmentsVisible = await page.getByText(/element-button|element-body/).count()
-  ?? 0
-const chipCount = await page.locator('img[alt], [class*=attachment] img, img[src^="blob:"]').count()
-console.log(`attachment-ish nodes: ${attachmentsVisible}, blob imgs: ${chipCount}`)
-const sawChips = (await page.locator('img[src^="blob:"]').count()) > 0
-if (!sawChips) {
-  // Fallback check: the input draft rail may use different markup — dump evidence.
-  await page.screenshot({ path: '/tmp/ui-smoke-fail.png', fullPage: true }).catch(() => {})
-  console.error('WARN: no blob-image chips found; inspect /tmp/ui-smoke-fail.png')
-} else {
-  console.log('PASS: picked element attached to composer (image draft chip visible)')
+// 5. Type an opinion and upload as 任务1.
+await page.getByPlaceholder(/修改意见/).fill('把这些元素改成蓝色主题')
+await page.getByRole('button', { name: /上传任务/ }).click()
+await page.waitForTimeout(1200)
+const blobImgs = await page.locator('img[src^="blob:"]').count()
+const composerEarly = page.locator('[contenteditable="true"]').first()
+const draftEarly = (await composerEarly.count()) ? ((await composerEarly.textContent()) ?? '') : ''
+if (blobImgs < 2 || !draftEarly.includes('任务1')) {
+  const notice = await page.locator('div').filter({ hasText: /已加入对话框|暂不可用/ }).first().textContent().catch(() => '')
+  console.error(`blob imgs: ${blobImgs}, notice: ${JSON.stringify(notice)}, draft: ${JSON.stringify(draftEarly.slice(0, 200))}`)
+  await fail('任务1 upload did not produce attachments + draft line')
 }
+console.log('PASS: 任务1 uploaded — attachment chips visible in composer')
 
-// 6. Type into the composer to confirm the draft send path is intact.
+// 6. Stage one more element and upload as 任务2.
+await page.mouse.click(canvasBox.x + canvasBox.width * 0.5, canvasBox.y + canvasBox.height * 0.42)
+await page.waitForTimeout(900)
+await page.getByPlaceholder(/修改意见/).fill('再把这个元素放大')
+await page.getByRole('button', { name: /上传任务/ }).click()
+await page.waitForTimeout(1200)
+console.log('PASS: 任务2 uploaded')
+
+// 7. The composer draft carries the ordered task lines.
 const composer = page.locator('[contenteditable="true"]').first()
-if (await composer.count()) {
-  await composer.click()
-  await composer.type('把 PRESS ME 按钮改成红色')
-  console.log('PASS: composer accepts text alongside attachments')
-} else {
-  console.error('WARN: composer editor not found')
+if (!(await composer.count())) await fail('composer editor not found')
+const draftText = (await composer.textContent()) ?? ''
+if (!draftText.includes('任务1') || !draftText.includes('任务2')) {
+  console.error('draft text:', JSON.stringify(draftText.slice(0, 400)))
+  await fail('composer draft missing 任务1/任务2 lines')
 }
+if (!draftText.includes('请按任务编号顺序逐个完成')) await fail('draft missing ordered-execution instruction')
+console.log('PASS: composer draft has ordered 任务1/任务2 lines')
 
+// 8. Composer still accepts manual text alongside the tasks.
+await composer.click()
+await composer.type(' 以上一起改，改完截图给我')
 await page.screenshot({ path: '/tmp/ui-smoke-final.png', fullPage: true })
 console.log('screenshot: /tmp/ui-smoke-final.png')
 
