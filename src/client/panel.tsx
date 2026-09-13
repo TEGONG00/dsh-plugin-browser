@@ -73,6 +73,7 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const stageRef = useRef<HTMLDivElement | null>(null)
   const scaleRef = useRef({ width: 1280, height: 800 })
+  const lastMouseRef = useRef({ x: 640, y: 400 })
   const resizeTimer = useRef<number | undefined>(undefined)
   const noticeTimer = useRef<number | undefined>(undefined)
   const [status, setStatus] = useState<BrowserStatus | null>(null)
@@ -161,6 +162,27 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
   // or manually cleared); the subscription lives with the panel mount.
   useEffect(() => watchComposer(), [watchComposer])
 
+  // Native non-passive wheel forwarder — the page only scrolls through this.
+  // WheelEvent deltas are normalized by deltaMode: many mouse wheels report
+  // LINES (≈3 per notch); forwarding that raw as 3px reads as "cannot scroll".
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return undefined
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const rect = canvas.getBoundingClientRect()
+      const scale = scaleRef.current.width / rect.width
+      const unit = event.deltaMode === 1 ? 33 : event.deltaMode === 2 ? scaleRef.current.height : 1
+      const dx = event.deltaX * unit * scale
+      const dy = event.deltaY * unit * scale
+      const { x, y } = lastMouseRef.current
+      console.debug('[dsh-browser] wheel fwd', { dy, x, y })
+      void postCommand({ type: 'input', kind: 'wheel', x, y, dx, dy })
+    }
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    return () => canvas.removeEventListener('wheel', onWheel)
+  }, [tab.visible])
+
   const toPageCoords = (event: { clientX: number; clientY: number }) => {
     const canvas = canvasRef.current
     if (!canvas) return { x: 0, y: 0 }
@@ -169,10 +191,12 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
     const scaleY = scaleRef.current.height / rect.height
     const x = (event.clientX - rect.left) * scaleX
     const y = (event.clientY - rect.top) * scaleY
-    return {
+    const page = {
       x: Math.min(Math.max(0, x), scaleRef.current.width - 1),
       y: Math.min(Math.max(0, y), scaleRef.current.height - 1),
     }
+    lastMouseRef.current = page
+    return page
   }
 
   const togglePick = async () => {

@@ -69,6 +69,8 @@ export class BrowserController {
   private readonly pickListeners = new Set<Listener<ElementPick>>()
   private readonly statusListeners = new Set<Listener<BrowserStatus>>()
   private readonly logger = console
+  private lastWheelStatusPush = 0
+  private wheelPushTimer?: ReturnType<typeof setTimeout>
 
   constructor(config: Config) {
     this.config = config
@@ -378,9 +380,27 @@ export class BrowserController {
     else await page.mouse.click(x, y, { delay: 30 })
   }
 
-  async wheel(dx: number, dy: number): Promise<void> {
+  /** Wheel at an explicit page position: the virtual cursor may be stale or
+   * sitting outside an inner scrollable, so move first, then scroll. Status
+   * pushes are throttled — trackpad streams fire many events per second. */
+  async wheel(x: number, y: number, dx: number, dy: number): Promise<void> {
     const page = await this.ensure()
+    await page.mouse.move(x, y)
     await page.mouse.wheel(dx, dy)
+    // Trailing-edge throttled status push: never lose the FINAL state to the
+    // throttle window (scroll position/title changes ride these updates).
+    if (this.wheelPushTimer) return
+    const elapsed = Date.now() - this.lastWheelStatusPush
+    if (elapsed > 600) {
+      this.lastWheelStatusPush = Date.now()
+      void this.pushStatus()
+      return
+    }
+    this.wheelPushTimer = setTimeout(() => {
+      this.wheelPushTimer = undefined
+      this.lastWheelStatusPush = Date.now()
+      void this.pushStatus()
+    }, 700 - elapsed)
   }
 
   async pressKey(key: string): Promise<void> {

@@ -26,6 +26,7 @@ const errors = []
 page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`))
 page.on('console', (message) => {
   if (message.type() === 'error') errors.push(`console: ${message.text()}`)
+  if (message.text().includes('[dsh-browser] wheel')) console.log('WHEELDEBUG:', message.text().slice(0, 260))
 })
 
 const fail = async (reason) => {
@@ -72,6 +73,46 @@ for (let i = 0; i < 10; i += 1) {
 }
 if (!sawTitle) await fail('panel status bar did not show navigated page title')
 console.log('PASS: panel navigated and status bar shows page title')
+
+// 3b. Wheel scrolling: a tall page whose title records window.scrollY.
+// (Navigate via the cmd API — Playwright fill() appends instead of replacing
+// on this controlled input when it shows the title display form.)
+const tallUrl = "data:text/html,<body onscroll=\"document.title='scrolled:'+window.scrollY\" style='height:4000px;margin:0'><h1 style='position:fixed'>tall page</h1></body>"
+await page.evaluate(async (url) => {
+  await fetch('/dsh-browser/api/cmd', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'navigate', url }),
+  })
+}, tallUrl)
+await page.waitForTimeout(1500)
+// Hover the canvas first (virtual cursor), then dispatch a wheel event —
+// synthetic AND a real trusted wheel (Playwright mouse.wheel).
+await canvas.hover()
+await page.waitForTimeout(200)
+await page.locator('canvas').first().dispatchEvent('wheel', {
+  deltaY: 600, deltaX: 0, deltaMode: 0, bubbles: true, cancelable: true,
+})
+const cbox = await canvas.boundingBox()
+if (cbox) {
+  await page.mouse.move(cbox.x + cbox.width / 2, cbox.y + cbox.height / 2)
+  await page.mouse.wheel(0, 600)
+}
+let scrolled = false
+for (let i = 0; i < 8; i += 1) {
+  await page.waitForTimeout(500)
+  const barText = await page.evaluate(() => {
+    const spans = [...document.querySelectorAll('span')]
+    return spans.map((s) => s.textContent ?? '').find((t) => t.includes('scrolled') || t.includes('tall') || t.includes('PanelDemo'))
+  })
+  console.log(`poll ${i}: status bar = ${JSON.stringify(barText)}`)
+  if ((await page.locator('text=/scrolled:[1-9]/').count()) > 0) {
+    scrolled = true
+    break
+  }
+}
+if (!scrolled) await fail('wheel event did not scroll the controlled page (status title has no scrollY)')
+console.log('PASS: wheel scrolling reaches the controlled page')
 
 // 4. Pick mode on; pick two elements — each inserts a 元素N chip, no attachments.
 await page.getByRole('button', { name: /选择元素/ }).click()
