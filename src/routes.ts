@@ -47,7 +47,7 @@ type PanelCommand =
   | { type: 'back' }
   | { type: 'forward' }
   | { type: 'reload' }
-  | { type: 'resize'; width: number; height: number }
+  | { type: 'resize'; width: number; height: number; dpr?: number }
   | { type: 'input'; kind: 'move' | 'click' | 'dblclick'; x: number; y: number }
   | { type: 'input'; kind: 'wheel'; x: number; y: number; dx: number; dy: number }
   | { type: 'input'; kind: 'key'; key: string }
@@ -135,7 +135,7 @@ async function dispatchCommand(browser: BrowserController, command: PanelCommand
       await browser.reload()
       return await browser.status()
     case 'resize':
-      await browser.resize(command.width, command.height)
+      await browser.resize(command.width, command.height, command.dpr)
       return await browser.status()
     case 'input': {
       if (command.kind === 'wheel') await browser.wheel(command.x, command.y, command.dx, command.dy)

@@ -66,11 +66,18 @@ npx @deepseek-ai/dsh web --patch ./dsh-plugin-browser/cordis.patch.yml --no-open
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `headless` | `true` | 无头运行 Chromium |
-| `viewport.width/height` | `1280×800` | 被控页面视口 |
+| `viewport.width/height` | `1280×800` | 初始视口（面板会实时跟随面板尺寸）|
 | `cdpEndpoint` | — | 改为连接已运行的浏览器（`--remote-debugging-port`）|
 | `executablePath` | — | 自定义 Chromium 路径 |
-| `jpegQuality` | `60` | 画面流与截图的 JPEG 质量（1-100）|
+| `jpegQuality` | `80` | 画面流与截图的 JPEG 质量（1-100）|
 | `navigationTimeoutMs` | `30000` | 导航超时 |
+| `hardwareAcceleration` | `auto` | GPU 加速 flags：`auto`（检测到 `/dev/dxg` 才启用）/ `on` / `off`。headless 下常静默回退软件渲染，属尽力而为 |
+| `userDataDir` | `~/.cache/dsh-plugin-browser/profile` | 持久化浏览器档案（缓存/Cookie 跨重启保留，二次加载同站明显提速）|
+
+## 清晰度与性能说明（WSL2）
+
+- **清晰度**：面板把 `window.devicePixelRatio` 传给宿主，通过 CDP 设备度量仿真让页面按显示密度渲染位图，高分屏（Windows 125%/150% 缩放）不再发虚；`jpegQuality` 可再调。
+- **速度**：浏览器档案持久化，二次打开同一站点走磁盘缓存；视口跟随面板尺寸，渲染像素量与面板成正比。WSL2 的 GPU 直通需要 Win11 + WDDM 2.9 驱动，headless Chromium 即使加 flags 也常回退 CPU 渲染——加载慢主要来自网络与冷缓存，缓存持久化后体感会明显改善。
 
 ## 验证
 

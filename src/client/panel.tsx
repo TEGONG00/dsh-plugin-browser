@@ -143,7 +143,7 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
     const post = () => {
       const { width, height } = stage.getBoundingClientRect()
       if (width < 40 || height < 40) return
-      void postCommand({ type: 'resize', width, height })
+      void postCommand({ type: 'resize', width, height, dpr: window.devicePixelRatio || 1 })
     }
     const observer = new ResizeObserver(() => {
       window.clearTimeout(resizeTimer.current)

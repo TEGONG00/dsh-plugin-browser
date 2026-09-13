@@ -1,6 +1,8 @@
 import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from 'playwright'
 import { fileURLToPath } from 'node:url'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
+import { homedir } from 'node:os'
+import path from 'node:path'
 import { PICKER_SCRIPT } from './picker-script.ts'
 import type { Config } from './config.ts'
 
@@ -71,14 +73,25 @@ export class BrowserController {
   private readonly logger = console
   private lastWheelStatusPush = 0
   private wheelPushTimer?: ReturnType<typeof setTimeout>
+  /** Device pixel ratio reported by the panel (window.devicePixelRatio). */
+  private dpr = 1
+  /** The controlled page's CSS viewport (may diverge from Playwright's via emulation). */
+  private cssViewport = { width: 1280, height: 800 }
+  private emuSession?: CDPSession
+  private pageCloseCleanup: Array<() => void> = []
 
   constructor(config: Config) {
     this.config = config
+    this.cssViewport = {
+      width: config.viewport?.width ?? 1280,
+      height: config.viewport?.height ?? 800,
+    }
   }
 
   async dispose(): Promise<void> {
     try {
       await this.browser?.close()
+      await this.context?.close()
     } catch (error) {
       this.logger.warn('[dsh-plugin-browser] browser close failed', error)
     }
@@ -86,7 +99,15 @@ export class BrowserController {
     this.context = undefined
     this.page = undefined
     this.cdp = undefined
+    this.emuSession = undefined
     this.screencastActive = false
+  }
+
+  /** Liveness across launch modes: regular launch keeps `browser`, persistent context only keeps `context`. */
+  private alive(): boolean {
+    if (!this.page || this.page.isClosed()) return false
+    if (this.browser) return this.browser.isConnected()
+    return this.context?.browser()?.isConnected() ?? false
   }
 
   onFrame(listener: Listener<string>): () => void {
@@ -106,7 +127,7 @@ export class BrowserController {
 
   /** Idempotently launch (or attach) and prepare the page. Safe to call per request. */
   async ensure(): Promise<Page> {
-    if (this.page && !this.page.isClosed() && this.browser?.isConnected()) return this.page
+    if (this.alive()) return this.page as Page
     if (this.starting) return this.starting.then(() => this.requirePage())
     this.starting = this.start().finally(() => {
       this.starting = undefined
@@ -121,22 +142,36 @@ export class BrowserController {
   }
 
   private async start(): Promise<void> {
-    const viewport = {
-      width: this.config.viewport?.width ?? 1280,
-      height: this.config.viewport?.height ?? 800,
-    }
+    const viewport = { ...this.cssViewport }
     if (this.config.cdpEndpoint) {
       this.browser = await chromium.connectOverCDP(this.config.cdpEndpoint)
       this.context = this.browser.contexts()[0] ?? await this.browser.newContext({ viewport })
+      this.page = await this.context.newPage()
     } else {
-      this.browser = await chromium.launch({
+      // Persistent profile: HTTP cache/cookies/localStorage survive restarts,
+      // which is what makes repeat page loads fast.
+      const userDataDir = this.config.userDataDir
+        ?? path.join(homedir(), '.cache', 'dsh-plugin-browser', 'profile')
+      mkdirSync(userDataDir, { recursive: true })
+      const base = {
         headless: this.config.headless ?? true,
         executablePath: this.config.executablePath,
         env: launchEnv(),
-      })
-      this.context = await this.browser.newContext({ viewport })
+        viewport,
+        deviceScaleFactor: 1,
+        args: this.gpuArgs(),
+      }
+      try {
+        this.context = await chromium.launchPersistentContext(userDataDir, base)
+      } catch (error) {
+        // GPU flags can break launches on exotic setups — retry without them.
+        this.logger.warn('[dsh-plugin-browser] launch with GPU flags failed; retrying without', error)
+        this.context = await chromium.launchPersistentContext(userDataDir, { ...base, args: undefined })
+      }
+      // launchPersistentContext opens with one page; the context owns the
+      // browser lifecycle, so `browser` stays unset here.
+      this.page = this.context.pages()[0] ?? await this.context.newPage()
     }
-    this.page = await this.context.newPage()
     await this.page.setViewportSize(viewport)
     // One binding per context; it survives navigations.
     await this.page.exposeBinding('__dshBrowserPickReport', (_source, payload: unknown) => {
@@ -150,9 +185,29 @@ export class BrowserController {
     this.page.on('close', () => {
       this.page = undefined
       this.cdp = undefined
+      this.emuSession = undefined
       this.screencastActive = false
+      for (const cleanup of this.pageCloseCleanup.splice(0)) {
+        try {
+          cleanup()
+        } catch {
+          // page teardown callbacks must not throw
+        }
+      }
     })
     this.logger.info('[dsh-plugin-browser] chromium ready')
+  }
+
+  /**
+   * GPU flags: headless Chromium on WSL2 often ignores them (SwiftShader
+   * fallback), but when the paravirtualized GPU is present they enable real
+   * compositing. 'auto' = only with /dev/dxg present.
+   */
+  private gpuArgs(): string[] | undefined {
+    const mode = this.config.hardwareAcceleration ?? 'auto'
+    if (mode === 'off') return undefined
+    if (mode === 'auto' && !existsSync('/dev/dxg')) return undefined
+    return ['--enable-gpu', '--ignore-gpu-blocklist', '--enable-unsafe-swiftshader']
   }
 
   private async handlePick(payload: Record<string, unknown>): Promise<void> {
@@ -177,20 +232,17 @@ export class BrowserController {
   }
 
   async status(): Promise<BrowserStatus> {
-    if (!this.page || !this.browser?.isConnected()) {
+    if (!this.alive()) {
       return {
         url: '',
         title: '',
-        viewport: {
-          width: this.config.viewport?.width ?? 1280,
-          height: this.config.viewport?.height ?? 800,
-        },
+        viewport: { ...this.cssViewport },
       }
     }
     return {
-      url: this.page.url(),
-      title: await this.page.title().catch(() => ''),
-      viewport: this.page.viewportSize() ?? { width: 1280, height: 800 },
+      url: this.page?.url() ?? '',
+      title: await this.page?.title().catch(() => '') ?? '',
+      viewport: { ...this.cssViewport },
     }
   }
 
@@ -288,9 +340,9 @@ export class BrowserController {
     this.cdpFrameHandler = onFrame
     await session.send('Page.startScreencast', {
       format: 'jpeg',
-      quality: this.config.jpegQuality ?? 60,
-      maxWidth: 1600,
-      maxHeight: 1200,
+      quality: this.config.jpegQuality ?? 80,
+      maxWidth: 2560,
+      maxHeight: 2560,
       everyNthFrame: 1,
     })
   }
@@ -316,8 +368,8 @@ export class BrowserController {
   }
 
   private async applyPicker(enabled: boolean): Promise<void> {
-    const page = this.page
-    if (!page || !this.browser?.isConnected()) return
+    if (!this.alive()) return
+    const page = this.requirePage()
     try {
       if (enabled) {
         await page.evaluate(PICKER_SCRIPT)
@@ -362,33 +414,66 @@ export class BrowserController {
     await this.pushStatus()
   }
 
-  /** Match the controlled viewport to the panel's box so the page fills it. */
-  async resize(width: number, height: number): Promise<void> {
+  /** Match the controlled page to the panel's CSS box and pixel density via
+   * CDP device-metrics emulation — applied live, no relaunch. Playwright's
+   * own viewport option is only the initial state. */
+  async resize(width: number, height: number, dpr?: number): Promise<void> {
+    if (dpr !== undefined) this.setDpr(dpr)
     const page = await this.ensure()
     const w = Math.round(Math.min(2000, Math.max(240, width)))
-    const h = Math.round(Math.min(2400, Math.max(200, height)))
-    const current = page.viewportSize()
-    if (current && Math.abs(current.width - w) < 2 && Math.abs(current.height - h) < 2) return
-    await page.setViewportSize({ width: w, height: h })
+    const h = Math.round(Math.min(3000, Math.max(200, height)))
+    if (Math.abs(this.cssViewport.width - w) < 2 && Math.abs(this.cssViewport.height - h) < 2 && Math.abs(this.dpr - (dpr ?? this.dpr)) < 0.01) return
+    const emu = await this.ensureEmulationSession()
+    await emu.send('Emulation.setDeviceMetricsOverride', {
+      width: w,
+      height: h,
+      deviceScaleFactor: this.dpr,
+      mobile: false,
+    })
+    this.cssViewport = { width: w, height: h }
     await this.pushStatus()
+  }
+
+  /** Dedicated CDP session for device-metrics emulation (independent of the
+   * screencast session, which restarts freely). */
+  private async ensureEmulationSession(): Promise<CDPSession> {
+    if (this.emuSession) return this.emuSession
+    const page = this.requirePage()
+    this.emuSession = await page.context().newCDPSession(page)
+    this.pageCloseCleanup.push(() => {
+      this.emuSession = undefined
+    })
+    return this.emuSession
+  }
+
+  /** Playwright input coordinates are CSS pixels; the panel sends device
+   * pixels (its frames are dpr-scaled), so scale them back down. */
+  private toCss(px: number): number {
+    return px / this.dpr
+  }
+
+  /** Set the device pixel ratio seen by the controlled page (applied live
+   * through CDP device-metrics emulation in resize()). */
+  private setDpr(dpr: number): void {
+    this.dpr = Math.min(3, Math.max(1, Number.isFinite(dpr) ? dpr : 1))
   }
 
   async mouse(kind: 'move' | 'click' | 'dblclick', x: number, y: number): Promise<void> {
     const page = await this.ensure()
-    if (kind === 'move') await page.mouse.move(x, y)
-    else if (kind === 'dblclick') await page.mouse.dblclick(x, y)
-    else await page.mouse.click(x, y, { delay: 30 })
+    const cx = this.toCss(x)
+    const cy = this.toCss(y)
+    if (kind === 'move') await page.mouse.move(cx, cy)
+    else if (kind === 'dblclick') await page.mouse.dblclick(cx, cy)
+    else await page.mouse.click(cx, cy, { delay: 30 })
   }
 
   /** Wheel at an explicit page position: the virtual cursor may be stale or
    * sitting outside an inner scrollable, so move first, then scroll. Status
-   * pushes are throttled — trackpad streams fire many events per second. */
+   * pushes are trailing-edge throttled — never lose the final state. */
   async wheel(x: number, y: number, dx: number, dy: number): Promise<void> {
     const page = await this.ensure()
-    await page.mouse.move(x, y)
-    await page.mouse.wheel(dx, dy)
-    // Trailing-edge throttled status push: never lose the FINAL state to the
-    // throttle window (scroll position/title changes ride these updates).
+    await page.mouse.move(this.toCss(x), this.toCss(y))
+    await page.mouse.wheel(dx / this.dpr, dy / this.dpr)
     if (this.wheelPushTimer) return
     const elapsed = Date.now() - this.lastWheelStatusPush
     if (elapsed > 600) {
@@ -478,10 +563,9 @@ export class BrowserController {
     const page = await this.ensure()
     const buffer = await page.screenshot({
       type: 'jpeg',
-      quality: this.config.jpegQuality ?? 60,
+      quality: this.config.jpegQuality ?? 80,
       fullPage: false,
     })
-    const viewport = page.viewportSize() ?? { width: 1280, height: 800 }
-    return { base64: buffer.toString('base64'), width: viewport.width, height: viewport.height }
+    return { base64: buffer.toString('base64'), width: this.cssViewport.width, height: this.cssViewport.height }
   }
 }
