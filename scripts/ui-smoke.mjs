@@ -114,6 +114,39 @@ for (let i = 0; i < 8; i += 1) {
 if (!scrolled) await fail('wheel event did not scroll the controlled page (status title has no scrollY)')
 console.log('PASS: wheel scrolling reaches the controlled page')
 
+// 3c. Coordinate precision: a marker page records where clicks land; a click
+// at the canvas center must land at the canvas center in page coordinates.
+const markerUrl = "<data:text/html,<body onclick='document.title=event.clientX+\",\"+event.clientY' style='margin:0'><h1>marker</h1></body>".slice(1)
+await page.evaluate(async (url) => {
+  await fetch('/dsh-browser/api/cmd', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'navigate', url }),
+  })
+}, markerUrl)
+await page.waitForTimeout(1200)
+const mbox = await canvas.boundingBox()
+if (!mbox) await fail('canvas box unavailable for marker click')
+await page.mouse.click(mbox.x + mbox.width / 2, mbox.y + mbox.height / 2)
+let markerTitle = null
+for (let i = 0; i < 8; i += 1) {
+  await page.waitForTimeout(400)
+  const t = await page.evaluate(() => {
+    const spans = [...document.querySelectorAll('span')]
+    const found = spans.map((s) => s.textContent ?? '').find((t) => /^\d+,\d+$/.test(t.trim()))
+    return found ?? null
+  })
+  if (t) { markerTitle = t.trim(); break }
+}
+if (!markerTitle) await fail('marker page never recorded the click')
+const [mx, my] = markerTitle.split(',').map(Number)
+const expectX = Math.round(mbox.width / 2)
+const expectY = Math.round(mbox.height / 2)
+if (Math.abs(mx - expectX) > 2 || Math.abs(my - expectY) > 2) {
+  await fail(`coordinate mismatch: click at canvas center should land near (${expectX},${expectY}), page saw (${mx},${my})`)
+}
+console.log(`PASS: click coordinates land on target (page saw ${mx},${my}, expected ≈${expectX},${expectY})`)
+
 // 4. Pick mode on; pick two elements — each inserts a 元素N chip, no attachments.
 await page.getByRole('button', { name: /选择元素/ }).click()
 await page.waitForTimeout(600)

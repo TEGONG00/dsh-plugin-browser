@@ -75,16 +75,15 @@ export class BrowserController {
   private wheelPushTimer?: ReturnType<typeof setTimeout>
   /** Device pixel ratio reported by the panel (window.devicePixelRatio). */
   private dpr = 1
-  /** The controlled page's CSS viewport (may diverge from Playwright's via emulation). */
-  private cssViewport = { width: 1280, height: 800 }
-  private emuSession?: CDPSession
-  private pageCloseCleanup: Array<() => void> = []
+  /** The emulation parameters last applied to the CDP session. */
+  private appliedViewport = { width: 1280, height: 800, dpr: 1 }
 
   constructor(config: Config) {
     this.config = config
-    this.cssViewport = {
+    this.appliedViewport = {
       width: config.viewport?.width ?? 1280,
       height: config.viewport?.height ?? 800,
+      dpr: 1,
     }
   }
 
@@ -99,7 +98,6 @@ export class BrowserController {
     this.context = undefined
     this.page = undefined
     this.cdp = undefined
-    this.emuSession = undefined
     this.screencastActive = false
   }
 
@@ -142,7 +140,7 @@ export class BrowserController {
   }
 
   private async start(): Promise<void> {
-    const viewport = { ...this.cssViewport }
+    const viewport = { width: this.appliedViewport.width, height: this.appliedViewport.height }
     if (this.config.cdpEndpoint) {
       this.browser = await chromium.connectOverCDP(this.config.cdpEndpoint)
       this.context = this.browser.contexts()[0] ?? await this.browser.newContext({ viewport })
@@ -185,15 +183,7 @@ export class BrowserController {
     this.page.on('close', () => {
       this.page = undefined
       this.cdp = undefined
-      this.emuSession = undefined
       this.screencastActive = false
-      for (const cleanup of this.pageCloseCleanup.splice(0)) {
-        try {
-          cleanup()
-        } catch {
-          // page teardown callbacks must not throw
-        }
-      }
     })
     this.logger.info('[dsh-plugin-browser] chromium ready')
   }
@@ -236,13 +226,13 @@ export class BrowserController {
       return {
         url: '',
         title: '',
-        viewport: { ...this.cssViewport },
+        viewport: { width: this.appliedViewport.width, height: this.appliedViewport.height },
       }
     }
     return {
       url: this.page?.url() ?? '',
       title: await this.page?.title().catch(() => '') ?? '',
-      viewport: { ...this.cssViewport },
+      viewport: { width: this.appliedViewport.width, height: this.appliedViewport.height },
     }
   }
 
@@ -303,22 +293,11 @@ export class BrowserController {
   }
 
   private async attachScreencastSession(page: Page): Promise<void> {
-    // Always attach a fresh CDP session: a cached one goes stale whenever the
-    // page was replaced by navigation or a crash ("Not attached to an active
-    // page"), and reusing it turns the next start into a throw.
-    if (this.cdp) {
-      const stale = this.cdp
-      this.cdp = undefined
-      this.cdpFrameHandler = undefined
-      try {
-        await stale.send('Page.stopScreencast').catch(() => undefined)
-        await stale.detach().catch(() => undefined)
-      } catch {
-        // detach of an already-dead session is fine
-      }
-    }
-    const session = await page.context().newCDPSession(page)
-    this.cdp = session
+    // Reuse the ONE shared CDP session (it also owns device-metrics
+    // emulation — detaching it would drop the override). The retry loop
+    // clears `cdp` on failure; ensureCdp then re-creates the session and
+    // re-applies the stored emulation before use.
+    const session = await this.ensureCdp()
     const onFrame = (frame: { data?: string; sessionId?: string }) => {
       if (frame.data) {
         for (const listener of this.frameListeners) {
@@ -415,65 +394,49 @@ export class BrowserController {
   }
 
   /** Match the controlled page to the panel's CSS box and pixel density via
-   * CDP device-metrics emulation — applied live, no relaunch. Playwright's
-   * own viewport option is only the initial state. */
+   * CDP device-metrics emulation — applied live, no relaunch. Input events
+   * and screencast frames both live in CSS pixels (the panel self-calibrates
+   * from frame size), so no dpr scaling applies to coordinates. */
   async resize(width: number, height: number, dpr?: number): Promise<void> {
-    if (dpr !== undefined) this.setDpr(dpr)
+    if (dpr !== undefined) this.dpr = Math.min(3, Math.max(1, Number.isFinite(dpr) ? dpr : 1))
     const page = await this.ensure()
     const w = Math.round(Math.min(2000, Math.max(240, width)))
     const h = Math.round(Math.min(3000, Math.max(200, height)))
-    if (Math.abs(this.cssViewport.width - w) < 2 && Math.abs(this.cssViewport.height - h) < 2 && Math.abs(this.dpr - (dpr ?? this.dpr)) < 0.01) return
-    const emu = await this.ensureEmulationSession()
-    await emu.send('Emulation.setDeviceMetricsOverride', {
+    const applied = this.appliedViewport
+    if (Math.abs(applied.width - w) < 2 && Math.abs(applied.height - h) < 2 && Math.abs(applied.dpr - this.dpr) < 0.01) return
+    const cdp = await this.ensureCdp()
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
       width: w,
       height: h,
       deviceScaleFactor: this.dpr,
       mobile: false,
     })
-    this.cssViewport = { width: w, height: h }
+    this.appliedViewport = { width: w, height: h, dpr: this.dpr }
     await this.pushStatus()
   }
 
-  /** Dedicated CDP session for device-metrics emulation (independent of the
-   * screencast session, which restarts freely). */
-  private async ensureEmulationSession(): Promise<CDPSession> {
-    if (this.emuSession) return this.emuSession
+  /**
+   * The one CDP session per page: hosts BOTH device-metrics emulation and
+   * screencast. Re-created on page close; a fresh session re-applies the
+   * stored emulation before use.
+   */
+  private async ensureCdp(): Promise<CDPSession> {
+    if (this.cdp) return this.cdp
     const page = this.requirePage()
-    this.emuSession = await page.context().newCDPSession(page)
-    this.pageCloseCleanup.push(() => {
-      this.emuSession = undefined
-    })
-    return this.emuSession
+    const session = await page.context().newCDPSession(page)
+    this.cdp = session
+    await session.send('Emulation.setDeviceMetricsOverride', {
+      width: this.appliedViewport.width,
+      height: this.appliedViewport.height,
+      deviceScaleFactor: this.dpr,
+      mobile: false,
+    }).catch(() => undefined)
+    return session
   }
 
-  /** Playwright input coordinates are CSS pixels; the panel sends device
-   * pixels (its frames are dpr-scaled), so scale them back down. */
-  private toCss(px: number): number {
-    return px / this.dpr
-  }
-
-  /** Set the device pixel ratio seen by the controlled page (applied live
-   * through CDP device-metrics emulation in resize()). */
-  private setDpr(dpr: number): void {
-    this.dpr = Math.min(3, Math.max(1, Number.isFinite(dpr) ? dpr : 1))
-  }
-
-  async mouse(kind: 'move' | 'click' | 'dblclick', x: number, y: number): Promise<void> {
-    const page = await this.ensure()
-    const cx = this.toCss(x)
-    const cy = this.toCss(y)
-    if (kind === 'move') await page.mouse.move(cx, cy)
-    else if (kind === 'dblclick') await page.mouse.dblclick(cx, cy)
-    else await page.mouse.click(cx, cy, { delay: 30 })
-  }
-
-  /** Wheel at an explicit page position: the virtual cursor may be stale or
-   * sitting outside an inner scrollable, so move first, then scroll. Status
-   * pushes are trailing-edge throttled — never lose the final state. */
-  async wheel(x: number, y: number, dx: number, dy: number): Promise<void> {
-    const page = await this.ensure()
-    await page.mouse.move(this.toCss(x), this.toCss(y))
-    await page.mouse.wheel(dx / this.dpr, dy / this.dpr)
+  /** Trailing-edge throttled status push — bursts (trackpad wheels, moves)
+   * collapse into one push, and the FINAL state always lands. */
+  private scheduleStatusPush(): void {
     if (this.wheelPushTimer) return
     const elapsed = Date.now() - this.lastWheelStatusPush
     if (elapsed > 600) {
@@ -486,6 +449,27 @@ export class BrowserController {
       this.lastWheelStatusPush = Date.now()
       void this.pushStatus()
     }, 700 - elapsed)
+  }
+
+  async mouse(kind: 'move' | 'click' | 'dblclick', x: number, y: number): Promise<void> {
+    const page = await this.ensure()
+    if (kind === 'move') {
+      await page.mouse.move(x, y)
+      return
+    }
+    if (kind === 'dblclick') await page.mouse.dblclick(x, y)
+    else await page.mouse.click(x, y, { delay: 30 })
+    this.scheduleStatusPush()
+  }
+
+  /** Wheel at an explicit page position: the virtual cursor may be stale or
+   * sitting outside an inner scrollable, so move first, then scroll. Status
+   * pushes are trailing-edge throttled — never lose the final state. */
+  async wheel(x: number, y: number, dx: number, dy: number): Promise<void> {
+    const page = await this.ensure()
+    await page.mouse.move(x, y)
+    await page.mouse.wheel(dx, dy)
+    this.scheduleStatusPush()
   }
 
   async pressKey(key: string): Promise<void> {
@@ -566,6 +550,6 @@ export class BrowserController {
       quality: this.config.jpegQuality ?? 80,
       fullPage: false,
     })
-    return { base64: buffer.toString('base64'), width: this.cssViewport.width, height: this.cssViewport.height }
+    return { base64: buffer.toString('base64'), width: this.appliedViewport.width, height: this.appliedViewport.height }
   }
 }
