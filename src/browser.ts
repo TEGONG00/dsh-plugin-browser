@@ -104,7 +104,7 @@ export class BrowserController {
 
   /** Idempotently launch (or attach) and prepare the page. Safe to call per request. */
   async ensure(): Promise<Page> {
-    if (this.page && this.browser?.isConnected()) return this.page
+    if (this.page && !this.page.isClosed() && this.browser?.isConnected()) return this.page
     if (this.starting) return this.starting.then(() => this.requirePage())
     this.starting = this.start().finally(() => {
       this.starting = undefined
@@ -214,9 +214,57 @@ export class BrowserController {
       await this.stopScreencast()
       return
     }
-    await this.ensure()
-    if (this.screencastActive) return
-    const session = await this.ensureCdp()
+    try {
+      await this.ensure()
+      if (this.screencastActive) return
+      await this.startScreencast()
+    } catch (error) {
+      // Never escape: a dead page/session must downgrade to "no frames"
+      // (retry on the next subscriber), not take the host down.
+      this.logger.warn('[dsh-plugin-browser] screencast unavailable; will retry on next subscribe', error)
+      this.cdp = undefined
+      this.screencastActive = false
+    }
+  }
+
+  private async startScreencast(): Promise<void> {
+    const page = this.requirePage()
+    // A CDP target can transiently detach (resize/navigation racing the
+    // attach in headless shells) — retry on a FRESH session before giving
+    // up; the caller downgrades to "no frames" after the last attempt.
+    let lastError: unknown
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.attachScreencastSession(page)
+        this.screencastActive = true
+        return
+      } catch (error) {
+        lastError = error
+        this.cdp = undefined
+        this.cdpFrameHandler = undefined
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+    }
+    throw lastError
+  }
+
+  private async attachScreencastSession(page: Page): Promise<void> {
+    // Always attach a fresh CDP session: a cached one goes stale whenever the
+    // page was replaced by navigation or a crash ("Not attached to an active
+    // page"), and reusing it turns the next start into a throw.
+    if (this.cdp) {
+      const stale = this.cdp
+      this.cdp = undefined
+      this.cdpFrameHandler = undefined
+      try {
+        await stale.send('Page.stopScreencast').catch(() => undefined)
+        await stale.detach().catch(() => undefined)
+      } catch {
+        // detach of an already-dead session is fine
+      }
+    }
+    const session = await page.context().newCDPSession(page)
+    this.cdp = session
     const onFrame = (frame: { data?: string; sessionId?: string }) => {
       if (frame.data) {
         for (const listener of this.frameListeners) {
@@ -228,9 +276,9 @@ export class BrowserController {
         }
       }
       if (frame.sessionId) {
-        const sessionId = frame.sessionId
+        const frameSessionId = frame.sessionId
         void session.send('Page.screencastFrameAck', {
-          sessionId: sessionId as unknown as number,
+          sessionId: frameSessionId as unknown as number,
         }).catch(() => undefined)
       }
     }
@@ -243,14 +291,6 @@ export class BrowserController {
       maxHeight: 1200,
       everyNthFrame: 1,
     })
-    this.screencastActive = true
-  }
-
-  private async ensureCdp(): Promise<CDPSession> {
-    if (this.cdp) return this.cdp
-    const page = this.requirePage()
-    this.cdp = await page.context().newCDPSession(page)
-    return this.cdp
   }
 
   private async stopScreencast(): Promise<void> {
@@ -317,6 +357,17 @@ export class BrowserController {
     const page = await this.ensure()
     await page.reload({ timeout: this.config.navigationTimeoutMs ?? 30_000 })
     if (this.pickEnabled) await this.applyPicker(true)
+    await this.pushStatus()
+  }
+
+  /** Match the controlled viewport to the panel's box so the page fills it. */
+  async resize(width: number, height: number): Promise<void> {
+    const page = await this.ensure()
+    const w = Math.round(Math.min(2000, Math.max(240, width)))
+    const h = Math.round(Math.min(2400, Math.max(200, height)))
+    const current = page.viewportSize()
+    if (current && Math.abs(current.width - w) < 2 && Math.abs(current.height - h) < 2) return
+    await page.setViewportSize({ width: w, height: h })
     await this.pushStatus()
   }
 

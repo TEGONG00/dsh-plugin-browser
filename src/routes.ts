@@ -47,6 +47,7 @@ type PanelCommand =
   | { type: 'back' }
   | { type: 'forward' }
   | { type: 'reload' }
+  | { type: 'resize'; width: number; height: number }
   | { type: 'input'; kind: 'move' | 'click' | 'dblclick'; x: number; y: number }
   | { type: 'input'; kind: 'wheel'; dx: number; dy: number }
   | { type: 'input'; kind: 'key'; key: string }
@@ -85,6 +86,8 @@ export function registerRoutes(ctx: Context, browser: BrowserController): void {
         for (const unsub of unsubs) unsub()
         void browser.setSubscriberCount(-1)
       })
+      // setSubscriberCount never throws (screencast failures downgrade to
+      // "no frames" and retry on the next subscribe).
       await browser.setSubscriberCount(1)
     },
   })
@@ -130,6 +133,9 @@ async function dispatchCommand(browser: BrowserController, command: PanelCommand
       return await browser.status()
     case 'reload':
       await browser.reload()
+      return await browser.status()
+    case 'resize':
+      await browser.resize(command.width, command.height)
       return await browser.status()
     case 'input': {
       if (command.kind === 'wheel') await browser.wheel(command.dx, command.dy)

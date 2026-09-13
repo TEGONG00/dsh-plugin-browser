@@ -37,8 +37,8 @@ interface BrowserPanelProps {
 const PANEL_STYLES = `
 .dsh-browser-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 4px;
-  height: 26px; min-width: 26px; padding: 0; border: none; border-radius: 6px;
-  background: transparent; color: inherit; cursor: pointer;
+  height: 28px; min-width: 28px; padding: 0; border: none; border-radius: 7px;
+  background: transparent; color: inherit; cursor: pointer; flex: none;
   font-size: 12px; line-height: 1;
 }
 .dsh-browser-btn:hover { background: var(--dsw-alias-interactive-bg-hover, color-mix(in srgb, currentColor 10%, transparent)); }
@@ -49,11 +49,12 @@ const PANEL_STYLES = `
   background: color-mix(in srgb, #3b82f6 12%, transparent);
 }
 .dsh-browser-url {
-  flex: 1; min-width: 80px; height: 26px; font-size: 12px; padding: 0 8px;
-  border: none; border-radius: 6px; background: transparent; color: inherit;
+  flex: 1; min-width: 60px; height: 30px; font-size: 12px; padding: 0 12px;
+  border: none; border-radius: 8px; background: color-mix(in srgb, currentColor 6%, transparent);
+  color: inherit; text-overflow: ellipsis;
 }
-.dsh-browser-url:hover { background: color-mix(in srgb, currentColor 6%, transparent); }
-.dsh-browser-url:focus { outline: none; background: color-mix(in srgb, currentColor 8%, transparent); }
+.dsh-browser-url:hover { background: color-mix(in srgb, currentColor 9%, transparent); }
+.dsh-browser-url:focus { outline: none; background: color-mix(in srgb, currentColor 10%, transparent); }
 .dsh-browser-url::placeholder { color: color-mix(in srgb, currentColor 45%, transparent); }
 `
 
@@ -70,12 +71,22 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
   const { insertElement, watchComposer } = props
   const { tab } = props.useTabInfo()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const stageRef = useRef<HTMLDivElement | null>(null)
   const scaleRef = useRef({ width: 1280, height: 800 })
+  const resizeTimer = useRef<number | undefined>(undefined)
+  const noticeTimer = useRef<number | undefined>(undefined)
   const [status, setStatus] = useState<BrowserStatus | null>(null)
   const [connected, setConnected] = useState(false)
   const [picking, setPicking] = useState(false)
   const [notice, setNotice] = useState('')
+  const [urlFocused, setUrlFocused] = useState(false)
   const [urlDraft, setUrlDraft] = useState('')
+
+  const flashNotice = useCallback((text: string) => {
+    setNotice(text)
+    window.clearTimeout(noticeTimer.current)
+    noticeTimer.current = window.setTimeout(() => setNotice(''), 4000)
+  }, [])
 
   const drawFrame = useCallback((base64: string) => {
     const canvas = canvasRef.current
@@ -95,11 +106,11 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
   const handlePick = useCallback((pick: ElementPick) => {
     try {
       const label = insertElement(pick)
-      setNotice(`${label} 已插入输入框，像引用文件一样在句子里引用它`)
+      flashNotice(`${label} 已插入输入框，像引用文件一样在句子里引用它`)
     } catch (error) {
-      setNotice(`插入失败：${error instanceof Error ? error.message : String(error)}`)
+      flashNotice(`插入失败：${error instanceof Error ? error.message : String(error)}`)
     }
-  }, [insertElement])
+  }, [insertElement, flashNotice])
 
   useEffect(() => {
     if (!tab.visible) return undefined
@@ -109,7 +120,7 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
     source.addEventListener('status', (event) => {
       const next = JSON.parse((event as MessageEvent).data) as BrowserStatus
       setStatus(next)
-      setUrlDraft(next.url)
+      if (!urlFocused) setUrlDraft(next.url)
     })
     source.addEventListener('frame', (event) => {
       drawFrame((event as MessageEvent).data as string)
@@ -121,25 +132,34 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
       source.close()
       setConnected(false)
     }
-  }, [tab.visible, drawFrame, handlePick])
+  }, [tab.visible, drawFrame, handlePick, urlFocused])
+
+  // Keep the controlled viewport matched to the stage box, so the page fills
+  // the panel instead of floating as a small letterboxed window.
+  useEffect(() => {
+    const stage = stageRef.current
+    if (!stage) return undefined
+    const post = () => {
+      const { width, height } = stage.getBoundingClientRect()
+      if (width < 40 || height < 40) return
+      void postCommand({ type: 'resize', width, height })
+    }
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(resizeTimer.current)
+      resizeTimer.current = window.setTimeout(post, 250)
+    })
+    observer.observe(stage)
+    const first = window.setTimeout(post, 400)
+    return () => {
+      observer.disconnect()
+      window.clearTimeout(resizeTimer.current)
+      window.clearTimeout(first)
+    }
+  }, [tab.visible])
 
   // Numbering restarts at 元素1 once the composer empties (send committed
   // or manually cleared); the subscription lives with the panel mount.
   useEffect(() => watchComposer(), [watchComposer])
-
-  // Native non-passive wheel forwarder so the panel itself never scrolls.
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return undefined
-    const onWheel = (event: WheelEvent) => {
-      event.preventDefault()
-      const rect = canvas.getBoundingClientRect()
-      const scale = scaleRef.current.width / rect.width
-      void postCommand({ type: 'input', kind: 'wheel', dx: event.deltaX * scale, dy: event.deltaY * scale })
-    }
-    canvas.addEventListener('wheel', onWheel, { passive: false })
-    return () => canvas.removeEventListener('wheel', onWheel)
-  }, [tab.visible])
 
   const toPageCoords = (event: { clientX: number; clientY: number }) => {
     const canvas = canvasRef.current
@@ -147,13 +167,18 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
     const rect = canvas.getBoundingClientRect()
     const scaleX = scaleRef.current.width / rect.width
     const scaleY = scaleRef.current.height / rect.height
-    return { x: (event.clientX - rect.left) * scaleX, y: (event.clientY - rect.top) * scaleY }
+    const x = (event.clientX - rect.left) * scaleX
+    const y = (event.clientY - rect.top) * scaleY
+    return {
+      x: Math.min(Math.max(0, x), scaleRef.current.width - 1),
+      y: Math.min(Math.max(0, y), scaleRef.current.height - 1),
+    }
   }
 
   const togglePick = async () => {
     const next = !picking
     setPicking(next)
-    setNotice(next ? '选择模式：点击页面元素，会以「元素N」引用插入输入框' : '')
+    if (next) flashNotice('选择模式：点击页面元素，会以「元素N」引用插入输入框')
     await postCommand({ type: 'pick', enabled: next })
   }
 
@@ -171,10 +196,14 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
     }
   }
 
+  const urlValue = !urlFocused && urlDraft.startsWith('data:')
+    ? (status?.title || 'data: 内嵌页面')
+    : urlDraft
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, fontSize: 12 }}>
       <style>{PANEL_STYLES}</style>
-      <div style={{ display: 'flex', gap: 2, alignItems: 'center', padding: '4px 6px', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 3, alignItems: 'center', padding: '5px 6px', flexWrap: 'nowrap' }}>
         <button
           type="button" className="dsh-browser-btn" title="后退"
           onClick={() => void postCommand({ type: 'back' })}
@@ -195,11 +224,20 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
         </button>
         <input
           className="dsh-browser-url"
-          value={urlDraft}
+          value={urlValue}
           placeholder="输入网址后回车"
+          spellCheck={false}
           onChange={(event) => setUrlDraft(event.target.value)}
+          onFocus={() => {
+            setUrlFocused(true)
+            setUrlDraft(status?.url ?? urlDraft)
+          }}
+          onBlur={() => setUrlFocused(false)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') void postCommand({ type: 'navigate', url: urlDraft })
+            if (event.key === 'Enter') {
+              void postCommand({ type: 'navigate', url: urlDraft })
+              ;(event.target as HTMLInputElement).blur()
+            }
           }}
         />
         <button
@@ -215,11 +253,14 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
         </button>
       </div>
       {notice ? (
-        <div style={{ margin: '0 6px 4px', padding: '4px 8px', borderRadius: 6, background: 'color-mix(in srgb, currentColor 8%, transparent)', color: 'inherit' }}>
+        <div style={{ margin: '0 6px 4px', padding: '4px 8px', borderRadius: 7, background: 'color-mix(in srgb, currentColor 8%, transparent)', color: 'inherit' }}>
           {notice}
         </div>
       ) : null}
-      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
+      <div
+        ref={stageRef}
+        style={{ flex: 1, minHeight: 0, display: 'flex', position: 'relative', background: 'color-mix(in srgb, currentColor 5%, transparent)' }}
+      >
         <canvas
           ref={canvasRef}
           tabIndex={0}
@@ -237,10 +278,10 @@ export function BrowserPanel(props: BrowserPanelProps): React.ReactNode {
             void postCommand({ type: 'input', kind: 'dblclick', x, y })
           }}
           style={{
-            width: '100%', height: 'auto', display: 'block',
+            width: '100%', height: '100%', display: 'block', objectFit: 'contain',
             outline: picking ? '2px solid #3b82f6' : 'none',
+            outlineOffset: picking ? '-2px' : undefined,
             cursor: picking ? 'crosshair' : 'default',
-            background: 'color-mix(in srgb, currentColor 12%, transparent)',
           }}
         />
       </div>
